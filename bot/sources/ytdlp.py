@@ -256,6 +256,7 @@ class YtdlpSource:
         track.stream_url = url
         track.stream_headers = dict(info.get("http_headers") or {})
         track.stream_expires_at = _stream_expiry(url)
+        track.stream_available_at = float(info.get("available_at") or 0)
         track.is_live = bool(info.get("is_live"))
 
     async def refresh_stream(self, track: Track) -> None:

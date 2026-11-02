@@ -15,6 +15,7 @@ import logging
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -55,6 +56,10 @@ async def _resolve(src: YtdlpSource) -> Track:
 
 def _ffmpeg_test(cfg: Config, track: Track) -> tuple[bool, str]:
     """Read 5 seconds of audio exactly the way the bot's player does."""
+    wait = track.stream_available_at - time.time()
+    if wait > 0:
+        print(f"         (waiting {wait:.1f}s for YouTube to make the link available, like the bot does)")
+        time.sleep(wait + 0.5)
     cmd = [cfg.ffmpeg_path, "-nostdin", "-loglevel", "error"]
     cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
     if track.stream_headers:

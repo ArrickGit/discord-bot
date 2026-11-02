@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_FAILURES = 5
 PAUSED_TIMEOUT_MULTIPLIER = 6
+# Never wait longer than this for a stream link to become usable.
+MAX_AVAILABILITY_WAIT = 30.0
 
 
 class PlayerError(Exception):
@@ -229,6 +231,8 @@ class GuildPlayer:
                     return
                 if self.queue.current is not track:
                     return  # /stop or /skip happened while the track was loading
+                if not await self._wait_until_available(track):
+                    return
                 try:
                     source = self._make_source(track)
                 except discord.ClientException:
@@ -287,6 +291,17 @@ class GuildPlayer:
             self.bot.loop.call_soon_threadsafe(self._finished.set)
         except RuntimeError:
             pass  # event loop already closed during shutdown
+
+    async def _wait_until_available(self, track: Track) -> bool:
+        """YouTube rejects some fresh stream links (403) for a few seconds. Wait them out.
+
+        Returns False if the track was skipped/stopped or the player was destroyed meanwhile.
+        """
+        wait = track.stream_available_at - time.time()
+        if wait <= 0:
+            return True
+        await asyncio.sleep(min(wait + 0.5, MAX_AVAILABILITY_WAIT))
+        return not self.destroyed and self.queue.current is track and bool(self.voice and self.voice.is_connected())
 
     def _make_source(self, track: Track) -> discord.AudioSource:
         before = ["-nostdin"]

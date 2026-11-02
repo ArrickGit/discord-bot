@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import itertools
+import time
 
 import pytest
 
@@ -114,12 +115,14 @@ class FakeResolver:
     def __init__(self):
         self.fail: set[str] = set()
         self.prepared: list[str] = []
+        self.available_in = 0.0  # seconds until the stream link "works"
 
     async def prepare(self, track):
         self.prepared.append(track.title)
         if track.title in self.fail:
             raise TrackUnavailableError("That video is private.")
         track.stream_url = "https://stream.example/" + track.title
+        track.stream_available_at = time.time() + self.available_in if self.available_in else 0.0
 
 
 class FakeRecommender:
@@ -252,6 +255,25 @@ async def test_stream_that_dies_immediately_is_retried_once(setup):
     await until(lambda: len(voice.played) == 3)
     assert voice.played[-1] == "Song 2"
     assert bot.resolver.prepared.count("Song 1") == 2
+
+
+async def test_waits_until_stream_link_is_available(setup):
+    bot, player, voice = setup
+    bot.resolver.available_in = 0.3
+    player.enqueue([short(1)])
+    await asyncio.sleep(0.15)
+    assert voice.played == []  # still inside YouTube's "not yet" window
+    await until(lambda: voice.played == ["Song 1"])
+
+
+async def test_stop_during_availability_wait_does_not_play(setup):
+    bot, player, voice = setup
+    bot.resolver.available_in = 0.3
+    player.enqueue([short(1), short(2)])
+    await until(lambda: bot.resolver.prepared == ["Song 1"])
+    player.stop()
+    await asyncio.sleep(0.6)
+    assert voice.played == []
 
 
 async def test_too_many_failures_clears_queue(setup):

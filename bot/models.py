@@ -49,6 +49,8 @@ class Track:
     stream_url: str | None = field(default=None, repr=False)
     stream_headers: dict[str, str] = field(default_factory=dict, repr=False)
     stream_expires_at: float = 0.0
+    # Some YouTube links return 403 until this epoch time (yt-dlp's ``available_at``).
+    stream_available_at: float = 0.0
     is_live: bool = False
 
     # Why this track was chosen (recommendations / autoplay), shown by /why.
@@ -84,6 +86,7 @@ class Track:
         self.stream_url = None
         self.stream_headers = {}
         self.stream_expires_at = 0.0
+        self.stream_available_at = 0.0
 
     def copy_for(self, requester_id: int, requester_name: str) -> Track:
         """A fresh copy for re-queueing (e.g. queue loop or saved playlists)."""
@@ -94,6 +97,7 @@ class Track:
             stream_url=None,
             stream_headers={},
             stream_expires_at=0.0,
+            stream_available_at=0.0,
             reasons=list(self.reasons),
             requested_at=time.time(),
         )
