@@ -192,3 +192,4 @@ bot/
 - Age-restricted, private, members-only and region-locked content is skipped with an explanation.
 - If YouTube keeps blocking the server, `ytdlp.cookies_file` can point to a cookies file. Only ever use a throwaway account for it.
 - Volume uses Discord's PCM volume transformer, which costs some CPU per active server. That's fine for a handful of servers.
+
