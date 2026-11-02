@@ -35,7 +35,8 @@ class _YtdlpLogger:
         log.debug(msg)
 
     def warning(self, msg: str) -> None:
-        log.debug("yt-dlp warning: %s", msg)
+        # Warnings often explain playback failures (e.g. a failed JS challenge), so keep them visible.
+        log.warning("yt-dlp warning: %s", msg)
 
     def error(self, msg: str) -> None:
         log.debug("yt-dlp error: %s", msg)
@@ -85,7 +86,6 @@ class YtdlpSource:
     def _options(self, **extra: Any) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
-            "no_warnings": True,
             "noprogress": True,
             "skip_download": True,
             "noplaylist": True,
