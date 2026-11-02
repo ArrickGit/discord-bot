@@ -1,0 +1,48 @@
+# Copy this file to config.yaml and edit it. Secrets (tokens/keys) go in .env, never here.
+
+# Your Discord user ID (Settings → Advanced → Developer Mode, then right-click yourself → Copy User ID).
+# Use a list for several owners: owner_id: [111..., 222...]
+owner_id: 123456789012345678
+
+# Volume the bot starts at (1-100). Servers can override with /settings default-volume.
+default_volume: 50
+
+# Leave voice after this many seconds with an empty queue.
+inactivity_timeout_seconds: 300
+# Leave voice after this many seconds once everyone else has left (playback pauses meanwhile).
+alone_timeout_seconds: 60
+
+maximum_queue_size: 500
+maximum_playlist_size: 200
+# Reject single videos longer than this (0 = no limit). Default: 3 hours.
+maximum_track_duration_seconds: 10800
+
+# While developing, put your test server's ID here: commands register there instantly and
+# owner commands only appear there. Set to null for normal multi-server use (global commands
+# can take up to an hour to show up the first time).
+command_sync_guild_id: null
+
+database_path: data/bot.db
+backup_directory: data/backups
+backup_interval_hours: 24   # 0 disables automatic backups
+backups_to_keep: 7
+
+log_directory: logs
+log_level: INFO
+
+ffmpeg_path: ffmpeg
+# Path to libopus if it isn't found automatically (rarely needed).
+opus_library: null
+
+# How strict Spotify → YouTube matching is. Higher = fewer wrong matches, more skipped songs.
+spotify_match_threshold: 45
+
+ytdlp:
+  # JavaScript runtimes yt-dlp may use for YouTube. Install deno (recommended).
+  js_runtimes: [deno]
+  # Optional Netscape-format cookies file. Only if YouTube keeps blocking the server;
+  # use a throwaway account, never your main one.
+  cookies_file: null
+  # YouTube is often less strict over IPv4.
+  force_ipv4: true
+  max_concurrent_extractions: 3

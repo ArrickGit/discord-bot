@@ -1,0 +1,10 @@
+[Unit]
+Description=Pull new commits for the Discord music bot and redeploy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/discord-music-bot/scripts/auto-deploy.sh
+# Leave time for pip installs on slow machines.
+TimeoutStartSec=10min

@@ -1,0 +1,36 @@
+[Unit]
+Description=Discord music bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=musicbot
+Group=musicbot
+WorkingDirectory=/opt/discord-music-bot
+Environment=PYTHONUNBUFFERED=1
+# deno is installed per-user by scripts/install-ubuntu.sh
+Environment=PATH=/opt/discord-music-bot/.deno/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DENO_DIR=/opt/discord-music-bot/data/deno-cache
+ExecStart=/opt/discord-music-bot/.venv/bin/python -m bot
+Restart=on-failure
+RestartSec=10
+# Give the bot time to leave voice channels cleanly on stop.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Hardening: the bot only needs its own directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/opt/discord-music-bot/data /opt/discord-music-bot/logs
+
+[Install]
+WantedBy=multi-user.target
