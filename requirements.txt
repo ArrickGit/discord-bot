@@ -1,6 +1,10 @@
 # Runtime dependencies. Lower bounds only: yt-dlp in particular must stay current,
 # because YouTube changes often. Update with: scripts/update.sh (or pip install -U -r requirements.txt)
 discord.py[voice]>=2.7.1
+# Exception to "lower bounds only": davey 0.2 (2026-11-02) requires callers to run new
+# prepare/execute_transition steps that discord.py 2.7.1 doesn't, so voice encryption
+# never activates and Discord drops all audio. Lift this once discord.py supports davey 0.2.
+davey>=0.1.7,<0.2
 yt-dlp[default]>=2026.10.26
 aiohttp>=3.10
 aiosqlite>=0.20
