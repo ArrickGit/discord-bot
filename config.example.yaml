@@ -43,6 +43,8 @@ ytdlp:
   # Optional Netscape-format cookies file. Only if YouTube keeps blocking the server;
   # use a throwaway account, never your main one.
   cookies_file: null
-  # YouTube is often less strict over IPv4.
-  force_ipv4: true
+  # Look up songs over IPv4 only. Leave this off if your server has IPv6: FFmpeg
+  # still downloads the audio over IPv6, and YouTube rejects the mismatch (403 errors).
+  # Only turn it on for a server without working IPv6.
+  force_ipv4: false
   max_concurrent_extractions: 3

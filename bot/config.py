@@ -50,7 +50,7 @@ class Secrets:
 class YtdlpConfig:
     js_runtimes: tuple[str, ...] = ("deno",)
     cookies_file: str | None = None
-    force_ipv4: bool = True
+    force_ipv4: bool = False
     max_concurrent_extractions: int = 3
 
 
@@ -141,7 +141,7 @@ def parse_config(data: dict[str, Any], base_dir: Path | None = None) -> Config:
     ytdlp = YtdlpConfig(
         js_runtimes=tuple(runtimes),
         cookies_file=cookies or None,
-        force_ipv4=bool(yt.get("force_ipv4", True)),
+        force_ipv4=bool(yt.get("force_ipv4", False)),
         max_concurrent_extractions=_int(yt, "max_concurrent_extractions", 3, 1, 16),
     )
 
