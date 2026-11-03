@@ -16,7 +16,7 @@ async def db(tmp_path):
 
 async def test_migration_sets_version(db):
     async with db.conn.execute("PRAGMA user_version") as cur:
-        assert (await cur.fetchone())[0] == 1
+        assert (await cur.fetchone())[0] == 2
     assert await db.healthcheck()
 
 
@@ -134,3 +134,24 @@ async def test_state(db):
     assert await db.get_state("maintenance") == "upgrading"
     await db.set_state("maintenance", None)
     assert await db.get_state("maintenance") is None
+
+
+async def test_saved_sessions_roundtrip_and_are_taken_once(db):
+    await db.save_session(1, 10, 20, {"current": None, "upcoming": [{"title": "x"}]})
+    await db.save_session(1, 11, None, {"upcoming": []})  # same server: replaced
+    await db.save_session(2, 30, 40, {"upcoming": []})
+    sessions = {s.guild_id: s for s in await db.take_sessions(max_age=60)}
+    assert set(sessions) == {1, 2}
+    assert (sessions[1].voice_channel_id, sessions[1].text_channel_id) == (11, None)
+    assert sessions[1].data == {"upcoming": []}
+    assert await db.take_sessions(max_age=60) == []  # taken: a second start won't restore again
+
+
+async def test_old_saved_sessions_are_dropped(db):
+    await db.save_session(1, 10, None, {"upcoming": []})
+    await db.conn.execute("UPDATE saved_sessions SET saved_at = saved_at - 7200")
+    await db.conn.commit()
+    assert await db.take_sessions(max_age=3600) == []
+    await db.save_session(1, 10, None, {"upcoming": []})
+    await db.delete_session(1)
+    assert await db.take_sessions(max_age=3600) == []

@@ -91,6 +91,7 @@ class MusicBot(commands.Bot):
         self.spotify: SpotifyClient | None = None
         self._backup_task: asyncio.Task[None] | None = None
         self._closing = False
+        self._restored = False
 
     # ----- lifecycle --------------------------------------------------
     async def setup_hook(self) -> None:
@@ -149,6 +150,11 @@ class MusicBot(commands.Bot):
         log.info("Logged in as %s (%s) in %d servers", self.user, self.user.id, len(self.guilds))
         if self.maintenance:
             await self.change_presence(activity=discord.Game("🛠️ maintenance"))
+        if not self._restored:  # on_ready can fire again after a reconnect
+            self._restored = True
+            count = await self.players.restore_saved()
+            if count:
+                log.info("Picked up %d queue(s) from before the restart", count)
 
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
@@ -166,7 +172,14 @@ class MusicBot(commands.Bot):
         self._closing = True
         log.info("Shutting down")
         try:
-            await asyncio.wait_for(self.players.destroy_all("The bot is restarting or shutting down."), timeout=10)
+            # Save each queue (with the exact position) so the next start can pick it up.
+            await asyncio.wait_for(self.players.save_all(), timeout=5)
+        except Exception:
+            log.debug("Error while saving queues", exc_info=True)
+        try:
+            await asyncio.wait_for(
+                self.players.destroy_all("The bot is restarting or shutting down.", keep_saved=True), timeout=10
+            )
         except Exception:
             log.debug("Error while stopping players", exc_info=True)
         if self._backup_task:

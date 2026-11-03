@@ -359,6 +359,82 @@ async def test_autoplay_early_pick_is_dropped_if_user_queues_a_song(setup, fast_
     assert player._autoplay_next is None  # a new song started, so the old pick was dropped
 
 
+@pytest.fixture
+def fast_save(monkeypatch):
+    monkeypatch.setattr(player_module, "SAVE_DELAY", 0.01)
+
+
+async def saved(db):
+    import json
+
+    async with db.conn.execute("SELECT data FROM saved_sessions WHERE guild_id = 77") as cur:
+        row = await cur.fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def saved_titles(data):
+    current = data["current"]["title"] if data["current"] else None
+    return current, [t["title"] for t in data["upcoming"]]
+
+
+async def test_queue_is_saved_and_songs_drop_off_as_they_play(setup, fast_save):
+    bot, player, voice = setup
+    player.enqueue([short(1), short(2)])
+    await until(lambda: voice.played == ["Song 1"])
+    await asyncio.sleep(0.1)
+    assert saved_titles(await saved(bot.db)) == ("Song 1", ["Song 2"])
+    voice.finish()
+    await until(lambda: voice.played == ["Song 1", "Song 2"])
+    await asyncio.sleep(0.1)
+    assert saved_titles(await saved(bot.db)) == ("Song 2", [])
+    voice.finish()
+    await until(lambda: player.queue.current is None)
+    await asyncio.sleep(0.1)
+    assert await saved(bot.db) is None  # nothing left to play: forgotten
+
+
+async def test_leaving_forgets_the_queue_but_a_restart_keeps_it(setup, fast_save):
+    bot, player, voice = setup
+    player.enqueue([short(1), short(2)])
+    await until(lambda: voice.played == ["Song 1"])
+    await player.save_session()
+    await player.destroy("bye", keep_saved=True)  # what a restart does
+    assert saved_titles(await saved(bot.db)) == ("Song 1", ["Song 2"])
+    await bot.db.save_session(77, 1, None, {"current": None, "upcoming": []})
+    other = GuildPlayer(bot, FakeGuild(), player.settings)
+    await other.destroy("everyone left")  # an ordinary leave
+    assert await saved(bot.db) is None
+
+
+async def test_restored_queue_resumes_where_it_left_off(setup):
+    bot, player, voice = setup
+    snapshot = {
+        "current": make_track(1, duration=300).to_dict(),
+        "position": 42.0,
+        "upcoming": [short(2).to_dict()],
+        "loop": "queue",
+        "volume": 30,
+        "autoplay": False,
+        "paused": False,
+    }
+    current, more = player.load_snapshot(snapshot)
+    assert (current.title, more) == ("Song 1", 1)
+    await until(lambda: voice.played == ["Song 1"])
+    assert player._start_offset == 42.0  # FFmpeg is told to seek here
+    assert 42.0 <= player.position() < 44
+    assert player.volume == 30 and player.queue.loop is LoopMode.QUEUE
+    voice.finish()  # ends ~0s after resuming a 300s song: judged on time played, so retried
+    await until(lambda: len(voice.played) == 2)
+    assert voice.played[-1] == "Song 1"
+
+
+async def test_restored_paused_queue_stays_paused(setup):
+    _, player, voice = setup
+    player.load_snapshot({"current": short(1).to_dict(), "position": 3.0, "upcoming": [], "paused": True})
+    await until(lambda: voice.played == ["Song 1"])
+    await until(lambda: voice.is_paused())
+
+
 async def test_too_many_failures_clears_queue(setup):
     bot, player, voice = setup
     tracks = [short(i) for i in range(8)]

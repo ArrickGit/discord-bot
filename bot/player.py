@@ -11,15 +11,16 @@ import asyncio
 import logging
 import shlex
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import discord
 
-from .db import GuildSettings
+from .db import GuildSettings, SavedSession
 from .models import Track
 from .queue import LoopMode, MusicQueue
 from .sources.errors import SourceBlockedError, SourceError
 from .ui import embeds
+from .ui.formatting import fmt_duration
 
 if TYPE_CHECKING:
     from .client import MusicBot
@@ -36,6 +37,12 @@ PREFETCH_DELAY = 1.0
 # Pick the autoplay song this long before the current one ends: late enough that
 # ratings made during the song still count, early enough to get it ready in time.
 AUTOPLAY_LOOKAHEAD = 45.0
+# The queue is saved (debounced) after every change so a restart can pick it up.
+SAVE_DELAY = 0.5
+# While playing, also save the position this often, so a crash loses at most this much.
+AUTOSAVE_INTERVAL = 30.0
+# Only pick a saved queue back up if the bot was down for less than this.
+RESTORE_MAX_AGE = 30 * 60
 
 
 class PlayerError(Exception):
@@ -73,6 +80,12 @@ class GuildPlayer:
         self._prefetch_loading: Track | None = None  # set while it's actually looking that song up
         self._autoplay_task: asyncio.Task[None] | None = None
         self._autoplay_next: Track | None = None  # autoplay's pick for after the current song
+        self._save_task: asyncio.Task[None] | None = None
+        self._autosave_task: asyncio.Task[None] | None = None
+        # After a restart: start this track this many seconds in (and maybe paused).
+        self._resume_from: tuple[Track, float] | None = None
+        self._resume_paused = False
+        self._start_offset = 0.0  # seconds skipped at the start of the current track
         self._np_lock = asyncio.Lock()
         self._started_at: float | None = None
         self._paused_at: float | None = None
@@ -82,7 +95,7 @@ class GuildPlayer:
         self._autoplay_misses = 0
         self.destroyed = False
         # Set last: the hook uses the attributes above.
-        self.queue.on_change = self._schedule_prefetch
+        self.queue.on_change = self._queue_changed
 
     # ----- state ------------------------------------------------------
     @property
@@ -110,6 +123,7 @@ class GuildPlayer:
         return [m.id for m in channel.members if not m.bot] if channel else []
 
     def position(self) -> float:
+        """Seconds into the current track (including any part skipped when resuming)."""
         if self._started_at is None:
             return 0.0
         now = self._paused_at or time.monotonic()
@@ -152,6 +166,8 @@ class GuildPlayer:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name=f"player-{self.guild.id}")
+        if self._autosave_task is None or self._autosave_task.done():
+            self._autosave_task = asyncio.create_task(self._autosave_loop())
 
     # ----- queue operations -------------------------------------------
     def enqueue(self, tracks: list[Track], *, front: bool = False) -> tuple[int, int]:
@@ -234,6 +250,10 @@ class GuildPlayer:
             return
 
         history_id: int | None = None
+        offset = 0.0
+        if self._resume_from is not None and self._resume_from[0] is track:
+            offset = 0.0 if track.is_live else max(0.0, self._resume_from[1])
+        self._resume_from = None
         try:
             for attempt in range(2):
                 await self._await_prefetch(track)
@@ -248,6 +268,7 @@ class GuildPlayer:
                     return  # /stop or /skip happened while the track was loading
                 if not await self._wait_until_available(track):
                     return
+                self._start_offset = offset
                 try:
                     source = self._make_source(track)
                 except discord.ClientException:
@@ -258,7 +279,7 @@ class GuildPlayer:
 
                 self._finished.clear()
                 self._play_error = None
-                self._started_at = time.monotonic()
+                self._started_at = time.monotonic() - offset
                 self._paused_at = None
                 self._paused_total = 0.0
                 self.skip_votes.clear()
@@ -270,6 +291,9 @@ class GuildPlayer:
                     return
                 if attempt == 0:
                     self._failures = 0
+                    if self._resume_paused:
+                        self._resume_paused = False
+                        self.pause()
                     history_id = await self._record_start(track)
                     await self.update_now_playing(new_track=True)
                     self._schedule_prefetch()
@@ -277,7 +301,7 @@ class GuildPlayer:
 
                 await self._finished.wait()
 
-                played = self.position()
+                played = self.position() - offset  # time actually played this attempt
                 died_early = (
                     self._end_reason is None
                     and not track.is_live
@@ -297,6 +321,7 @@ class GuildPlayer:
                 reason = self._end_reason or ("error" if self._play_error else "completed")
                 await self._record_end(history_id, self.position(), reason)
             self._started_at = None
+            self._start_offset = 0.0
 
     def _after(self, error: Exception | None) -> None:
         # Runs in discord.py's audio thread.
@@ -321,6 +346,8 @@ class GuildPlayer:
 
     def _make_source(self, track: Track) -> discord.AudioSource:
         before = ["-nostdin"]
+        if self._start_offset > 0:
+            before += ["-ss", f"{self._start_offset:.1f}"]  # resume part-way through after a restart
         if not track.is_live:
             before += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
         if track.stream_headers:
@@ -353,6 +380,76 @@ class GuildPlayer:
             self._failures = 0
             return
         await self._send_error(f"Skipped **{embeds.escape(track.display_title)}**: {exc}")
+
+    # ----- saving the queue across restarts ----------------------------
+    def _queue_changed(self) -> None:
+        self._schedule_prefetch()
+        self._schedule_save()
+
+    def _schedule_save(self) -> None:
+        if self.destroyed:
+            return
+        self._cancel(self._save_task)
+        self._save_task = asyncio.create_task(self._save_soon())
+
+    async def _save_soon(self) -> None:
+        await asyncio.sleep(SAVE_DELAY)  # one save for a burst of changes
+        await self.save_session()
+
+    async def _autosave_loop(self) -> None:
+        while not self.destroyed:
+            await asyncio.sleep(AUTOSAVE_INTERVAL)
+            if self.is_playing and not self.is_paused:
+                await self.save_session()
+
+    def snapshot(self) -> dict[str, Any] | None:
+        """Everything needed to pick the music back up after a restart, or None if nothing's queued."""
+        current = self.queue.current
+        upcoming = self.queue.upcoming
+        if current is None and not upcoming:
+            return None
+        position = self.position() if current is not None and self._started_at is not None else 0.0
+        return {
+            "current": current.to_dict() if current is not None else None,
+            "position": round(position, 1),
+            "upcoming": [t.to_dict() for t in upcoming],
+            "loop": self.queue.loop.value,
+            "volume": self.volume,
+            "autoplay": self.autoplay,
+            # Paused by someone (not because everyone left): stay paused after the restart.
+            "paused": self.is_paused and not self._auto_paused,
+        }
+
+    async def save_session(self) -> None:
+        """Save the queue so a restart can pick it up; forget it once nothing's left to play."""
+        if self.destroyed:
+            return
+        data = self.snapshot()
+        channel = self.channel
+        try:
+            if data is None:
+                await self.bot.db.delete_session(self.guild.id)
+            elif channel is not None:
+                await self.bot.db.save_session(self.guild.id, channel.id, getattr(self.text_channel, "id", None), data)
+        except Exception:
+            log.debug("Could not save the queue for guild %s", self.guild.id, exc_info=True)
+
+    def load_snapshot(self, data: dict[str, Any]) -> tuple[Track | None, int]:
+        """Queue up a saved session. Returns ``(current track, songs queued after it)``."""
+        current = Track.from_dict(data["current"]) if data.get("current") else None
+        upcoming = [Track.from_dict(t) for t in data.get("upcoming") or []]
+        try:
+            self.queue.loop = LoopMode(data.get("loop") or LoopMode.OFF.value)
+        except ValueError:
+            pass
+        if isinstance(data.get("volume"), int):
+            self.set_volume(data["volume"])
+        self.autoplay = bool(data.get("autoplay", self.autoplay))
+        if current is not None:
+            self._resume_from = (current, float(data.get("position") or 0.0))
+            self._resume_paused = bool(data.get("paused"))
+        self.enqueue(([current] if current is not None else []) + upcoming)
+        return current, len(upcoming)
 
     # ----- prefetch & autoplay ----------------------------------------
     def _next_up(self) -> Track | None:
@@ -572,13 +669,26 @@ class GuildPlayer:
         if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
-    async def destroy(self, reason: str = "Disconnected.", *, announce: bool = True) -> None:
+    async def destroy(self, reason: str = "Disconnected.", *, announce: bool = True, keep_saved: bool = False) -> None:
+        """Stop and leave. ``keep_saved`` keeps the saved queue (used when the bot restarts)."""
         if self.destroyed:
             return
         self.destroyed = True
         self.bot.players.forget(self.guild.id)
-        for task in (self._idle_task, self._alone_task, self._prefetch_task, self._autoplay_task):
+        for task in (
+            self._idle_task,
+            self._alone_task,
+            self._prefetch_task,
+            self._autoplay_task,
+            self._save_task,
+            self._autosave_task,
+        ):
             self._cancel(task)
+        if not keep_saved:
+            try:
+                await self.bot.db.delete_session(self.guild.id)
+            except Exception:
+                log.debug("Could not clear the saved queue for guild %s", self.guild.id, exc_info=True)
         self._end_reason = "stopped"
         self.queue.stop()
         voice, self.voice = self.voice, None
@@ -638,10 +748,59 @@ class PlayerManager:
                 self._players[guild.id] = player
             return player
 
-    async def destroy_all(self, reason: str) -> int:
+    async def destroy_all(self, reason: str, *, keep_saved: bool = False) -> int:
         players = self.all()
-        await asyncio.gather(*(p.destroy(reason) for p in players), return_exceptions=True)
+        await asyncio.gather(*(p.destroy(reason, keep_saved=keep_saved) for p in players), return_exceptions=True)
         return len(players)
+
+    async def save_all(self) -> None:
+        await asyncio.gather(*(p.save_session() for p in self.all()), return_exceptions=True)
+
+    async def restore_saved(self) -> int:
+        """After a restart, pick up each server's music where it left off. Returns how many."""
+        try:
+            sessions = await self.bot.db.take_sessions(RESTORE_MAX_AGE)
+        except Exception:
+            log.exception("Couldn't load saved queues")
+            return 0
+        restored = 0
+        for session in sessions:
+            try:
+                restored += await self._restore(session)
+            except Exception:
+                log.exception("Couldn't restore the queue for guild %s", session.guild_id)
+        return restored
+
+    async def _restore(self, session: SavedSession) -> bool:
+        guild = self.bot.get_guild(session.guild_id)
+        channel = guild.get_channel(session.voice_channel_id) if guild else None
+        if guild is None or not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            return False
+        if not any(not m.bot for m in channel.members):
+            log.info("Not restoring the queue for guild %s: nobody is in the voice channel", guild.id)
+            return False
+        player = await self.get_or_create(guild)
+        text = guild.get_channel(session.text_channel_id) if session.text_channel_id else None
+        if isinstance(text, discord.abc.Messageable):
+            player.text_channel = text
+        await player.connect(channel)
+        current, more = player.load_snapshot(session.data)
+        log.info("Restored the queue for guild %s after a restart", guild.id)
+        if player.text_channel is not None and (current is not None or more):
+            what = f"**{embeds.escape(current.display_title)}**" if current else "the queue"
+            at = session.data.get("position") or 0
+            where = f" from {fmt_duration(at)}" if current and at >= 1 else ""
+            tail = f", with {more} more queued" if current and more else ""
+            try:
+                await player.text_channel.send(
+                    f"\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} I restarted. "
+                    f"Picking up where we left off: {what}{where}{tail}.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    delete_after=120,
+                )
+            except discord.HTTPException:
+                pass
+        return True
 
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState

@@ -141,7 +141,7 @@ So deploying is just `git push`.
 
 Notes:
 - The server copy is deploy-only. Edits to tracked files in `/opt/discord-music-bot` are overwritten. `.env`, `config.yaml`, `data/` and `logs/` are never touched.
-- Restarting interrupts any music that's playing.
+- A restart (a deploy, a crash or a reboot) pauses the music for a few seconds. The bot saves each server's queue, then rejoins and picks up the current song where it stopped. It only does this if people are still in the voice channel and the bot was down for less than 30 minutes.
 - If the bot was stopped on purpose, it stays stopped.
 - **Private repo:** give the `musicbot` user a read-only deploy key:
   ```bash

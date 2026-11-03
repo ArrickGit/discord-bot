@@ -6,6 +6,7 @@ about people.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, fields
@@ -18,7 +19,7 @@ from .models import Platform, Track
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -93,6 +94,16 @@ _MIGRATIONS: dict[int, str] = {
         value  TEXT
     );
     """,
+    2: """
+    -- Each server's queue, so a restart (e.g. a deploy) can pick up where it left off.
+    CREATE TABLE saved_sessions (
+        guild_id          INTEGER PRIMARY KEY,
+        voice_channel_id  INTEGER NOT NULL,
+        text_channel_id   INTEGER,
+        data              TEXT    NOT NULL,
+        saved_at          REAL    NOT NULL
+    );
+    """,
 }
 
 CONTROL_MODES = ("everyone", "dj", "mods")
@@ -143,6 +154,15 @@ class StoredTrack:
             requester_name=requester_name,
             origin_url=self.origin_url,
         )
+
+
+@dataclass
+class SavedSession:
+    guild_id: int
+    voice_channel_id: int
+    text_channel_id: int | None
+    data: dict[str, Any]
+    saved_at: float
 
 
 @dataclass
@@ -219,6 +239,43 @@ class Database:
                 (key, value),
             )
         await self.conn.commit()
+
+    # ----- saved sessions (queues kept across restarts) ----------------
+    async def save_session(
+        self, guild_id: int, voice_channel_id: int, text_channel_id: int | None, data: dict[str, Any]
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO saved_sessions(guild_id, voice_channel_id, text_channel_id, data, saved_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+            "voice_channel_id = excluded.voice_channel_id, text_channel_id = excluded.text_channel_id, "
+            "data = excluded.data, saved_at = excluded.saved_at",
+            (guild_id, voice_channel_id, text_channel_id, json.dumps(data), time.time()),
+        )
+        await self.conn.commit()
+
+    async def delete_session(self, guild_id: int) -> None:
+        await self.conn.execute("DELETE FROM saved_sessions WHERE guild_id = ?", (guild_id,))
+        await self.conn.commit()
+
+    async def take_sessions(self, max_age: float) -> list[SavedSession]:
+        """Return sessions saved within ``max_age`` seconds and remove all saved sessions."""
+        async with self.conn.execute(
+            "SELECT * FROM saved_sessions WHERE saved_at >= ?", (time.time() - max_age,)
+        ) as cur:
+            rows = await cur.fetchall()
+        await self.conn.execute("DELETE FROM saved_sessions")
+        await self.conn.commit()
+        sessions = []
+        for row in rows:
+            try:
+                data = json.loads(row["data"])
+            except ValueError:
+                log.warning("Ignoring unreadable saved session for guild %s", row["guild_id"])
+                continue
+            sessions.append(
+                SavedSession(row["guild_id"], row["voice_channel_id"], row["text_channel_id"], data, row["saved_at"])
+            )
+        return sessions
 
     # ----- guild settings ---------------------------------------------
     async def get_guild_settings(self, guild_id: int) -> GuildSettings:

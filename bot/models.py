@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from typing import Any
 
@@ -21,6 +21,10 @@ PLATFORM_LABELS = {
     Platform.SPOTIFY: "Spotify",
     Platform.LASTFM: "Last.fm",
 }
+
+
+# Stream links expire within hours, so they are never saved.
+_UNSAVED_FIELDS = frozenset({"stream_url", "stream_headers", "stream_expires_at", "stream_available_at"})
 
 
 @dataclass
@@ -79,6 +83,30 @@ class Track:
         if self.artist and self.artist.lower() not in self.title.lower():
             return f"{self.artist} - {self.title}"
         return self.title
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-safe copy for saving the queue across restarts (stream links left out)."""
+        data = {f.name: getattr(self, f.name) for f in fields(self) if f.name not in _UNSAVED_FIELDS}
+        data["platform"] = self.platform.value
+        data["origin_platform"] = self.origin_platform.value if self.origin_platform else None
+        data["reasons"] = list(self.reasons)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Track:
+        """Rebuild a track saved with :meth:`to_dict`. Unknown keys (from newer versions) are ignored."""
+        known = {f.name for f in fields(cls)} - _UNSAVED_FIELDS
+        values = {k: v for k, v in data.items() if k in known}
+        try:
+            values["platform"] = Platform(values.get("platform") or Platform.YOUTUBE.value)
+        except ValueError:
+            values["platform"] = Platform.YOUTUBE
+        try:
+            values["origin_platform"] = Platform(values["origin_platform"]) if values.get("origin_platform") else None
+        except ValueError:
+            values["origin_platform"] = None
+        values["reasons"] = list(values.get("reasons") or [])
+        return cls(**values)
 
     def stream_is_fresh(self, margin: float = 120.0) -> bool:
         return bool(self.stream_url) and self.stream_expires_at - margin > time.time()
