@@ -11,6 +11,7 @@ import pytest
 
 from bot.config import parse_config
 from bot.db import Database, GuildSettings
+from bot import player as player_module
 from bot.player import GuildPlayer, PlayerManager
 from bot.queue import LoopMode
 from bot.sources.errors import TrackUnavailableError
@@ -112,13 +113,20 @@ class FakeText:
 
 
 class FakeResolver:
+    """Like the real resolver: a track that already has a stream link isn't looked up again."""
+
     def __init__(self):
         self.fail: set[str] = set()
-        self.prepared: list[str] = []
+        self.prepared: list[str] = []  # one entry per actual lookup
         self.available_in = 0.0  # seconds until the stream link "works"
+        self.delay = 0.0  # how long a lookup takes
 
     async def prepare(self, track):
+        if track.stream_url and track.title not in self.fail:
+            return
         self.prepared.append(track.title)
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if track.title in self.fail:
             raise TrackUnavailableError("That video is private.")
         track.stream_url = "https://stream.example/" + track.title
@@ -128,8 +136,10 @@ class FakeResolver:
 class FakeRecommender:
     def __init__(self):
         self.next = None
+        self.calls = 0
 
     async def recommend(self, *a, **k):
+        self.calls += 1
         t, self.next = self.next, None
         return t
 
@@ -274,6 +284,79 @@ async def test_stop_during_availability_wait_does_not_play(setup):
     player.stop()
     await asyncio.sleep(0.6)
     assert voice.played == []
+
+
+@pytest.fixture
+def fast_prefetch(monkeypatch):
+    monkeypatch.setattr(player_module, "PREFETCH_DELAY", 0.01)
+
+
+async def test_song_queued_during_playback_is_ready_before_its_turn(setup, fast_prefetch):
+    bot, player, voice = setup
+    player.enqueue([short(1)])
+    await until(lambda: voice.played == ["Song 1"])
+    player.enqueue([short(2)])
+    await until(lambda: "Song 2" in bot.resolver.prepared)
+    assert voice.played == ["Song 1"]  # got ready while Song 1 was still playing
+    voice.finish()
+    await until(lambda: voice.played == ["Song 1", "Song 2"])
+    assert bot.resolver.prepared.count("Song 2") == 1  # not looked up again at its turn
+
+
+async def test_moving_a_song_to_the_front_gets_it_ready(setup, fast_prefetch):
+    bot, player, voice = setup
+    player.enqueue([short(1), short(2), short(3)])
+    await until(lambda: voice.played == ["Song 1"] and "Song 2" in bot.resolver.prepared)
+    player.queue.move(2, 1)  # Song 3 is next now
+    await until(lambda: "Song 3" in bot.resolver.prepared)
+
+
+async def test_song_end_waits_for_lookup_already_in_progress(setup, fast_prefetch):
+    bot, player, voice = setup
+    player.enqueue([short(1)])
+    await until(lambda: voice.played == ["Song 1"])
+    bot.resolver.delay = 0.3
+    player.enqueue([short(2)])
+    await until(lambda: "Song 2" in bot.resolver.prepared)  # prefetch lookup has started
+    voice.finish()
+    await until(lambda: voice.played == ["Song 1", "Song 2"])
+    assert bot.resolver.prepared.count("Song 2") == 1
+
+
+async def test_looping_song_is_not_looked_up_again(setup):
+    bot, player, voice = setup
+    player.queue.loop = LoopMode.SONG
+    player.enqueue([short(1)])
+    await until(lambda: len(voice.played) == 1)
+    voice.finish()
+    await until(lambda: len(voice.played) == 2)
+    assert bot.resolver.prepared == ["Song 1"]
+
+
+async def test_autoplay_pick_is_made_and_readied_before_song_ends(setup, fast_prefetch):
+    bot, player, voice = setup
+    player.autoplay = True
+    rec = short("auto")
+    rec.via = "autoplay"
+    bot.recommender.next = rec
+    player.enqueue([short(1)])  # 10s song: inside the lookahead window, so it picks right away
+    await until(lambda: "Song auto" in bot.resolver.prepared)
+    assert voice.played == ["Song 1"]
+    assert bot.recommender.calls == 1
+    voice.finish()
+    await until(lambda: voice.played == ["Song 1", "Song auto"])
+
+
+async def test_autoplay_early_pick_is_dropped_if_user_queues_a_song(setup, fast_prefetch):
+    bot, player, voice = setup
+    player.autoplay = True
+    bot.recommender.next = short("auto")
+    player.enqueue([short(1)])
+    await until(lambda: player._autoplay_next is not None)
+    player.enqueue([short(2)])
+    voice.finish()
+    await until(lambda: voice.played == ["Song 1", "Song 2"])
+    assert player._autoplay_next is None  # a new song started, so the old pick was dropped
 
 
 async def test_too_many_failures_clears_queue(setup):

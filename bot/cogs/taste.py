@@ -103,8 +103,7 @@ class Taste(commands.Cog):
         settings = await self.bot.db.update_guild_settings(interaction.guild.id, autoplay=enabled)
         if player is not None:
             player.settings = settings
-            player.autoplay = enabled
-            player._autoplay_misses = 0
+            player.set_autoplay(enabled)
             if enabled and player.queue.current is None:
                 player._wake.set()
             await player.update_now_playing()

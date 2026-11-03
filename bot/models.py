@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from typing import Any
 
 
 class Platform(StrEnum):
@@ -88,18 +89,23 @@ class Track:
         self.stream_expires_at = 0.0
         self.stream_available_at = 0.0
 
-    def copy_for(self, requester_id: int, requester_name: str) -> Track:
-        """A fresh copy for re-queueing (e.g. queue loop or saved playlists)."""
+    def copy_for(self, requester_id: int, requester_name: str, *, keep_stream: bool = False) -> Track:
+        """A fresh copy for re-queueing (e.g. queue loop or saved playlists).
+
+        ``keep_stream`` reuses the stream link (it's still refreshed if it expires), so a
+        looping queue doesn't look every song up again.
+        """
+        if keep_stream:
+            stream: dict[str, Any] = {"stream_headers": dict(self.stream_headers)}
+        else:
+            stream = {"stream_url": None, "stream_headers": {}, "stream_expires_at": 0.0, "stream_available_at": 0.0}
         return replace(
             self,
             requester_id=requester_id,
             requester_name=requester_name,
-            stream_url=None,
-            stream_headers={},
-            stream_expires_at=0.0,
-            stream_available_at=0.0,
             reasons=list(self.reasons),
             requested_at=time.time(),
+            **stream,
         )
 
 

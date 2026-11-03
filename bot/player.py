@@ -30,6 +30,12 @@ MAX_CONSECUTIVE_FAILURES = 5
 PAUSED_TIMEOUT_MULTIPLIER = 6
 # Never wait longer than this for a stream link to become usable.
 MAX_AVAILABILITY_WAIT = 30.0
+# After the queue changes, wait this long before getting the next song ready, so a
+# burst of edits (several /move or /remove) only triggers one lookup.
+PREFETCH_DELAY = 1.0
+# Pick the autoplay song this long before the current one ends: late enough that
+# ratings made during the song still count, early enough to get it ready in time.
+AUTOPLAY_LOOKAHEAD = 45.0
 
 
 class PlayerError(Exception):
@@ -63,6 +69,10 @@ class GuildPlayer:
         self._idle_task: asyncio.Task[None] | None = None
         self._alone_task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
+        self._prefetch_target: Track | None = None  # the song the prefetch task is for
+        self._prefetch_loading: Track | None = None  # set while it's actually looking that song up
+        self._autoplay_task: asyncio.Task[None] | None = None
+        self._autoplay_next: Track | None = None  # autoplay's pick for after the current song
         self._np_lock = asyncio.Lock()
         self._started_at: float | None = None
         self._paused_at: float | None = None
@@ -71,6 +81,8 @@ class GuildPlayer:
         self._failures = 0
         self._autoplay_misses = 0
         self.destroyed = False
+        # Set last: the hook uses the attributes above.
+        self.queue.on_change = self._schedule_prefetch
 
     # ----- state ------------------------------------------------------
     @property
@@ -195,7 +207,9 @@ class GuildPlayer:
                 self._end_reason = None
                 track = self.queue.advance(skipped=skipped)
                 if track is None and self.autoplay:
-                    track = await self._autoplay_pick()
+                    track, self._autoplay_next = self._autoplay_next, None
+                    if track is None:
+                        track = await self._autoplay_pick()
                     if track is not None:
                         self.queue.current = track
                 if track is None:
@@ -222,6 +236,7 @@ class GuildPlayer:
         history_id: int | None = None
         try:
             for attempt in range(2):
+                await self._await_prefetch(track)
                 try:
                     await self.bot.resolver.prepare(track)
                 except SourceError as exc:
@@ -258,6 +273,7 @@ class GuildPlayer:
                     history_id = await self._record_start(track)
                     await self.update_now_playing(new_track=True)
                     self._schedule_prefetch()
+                    self._schedule_autoplay_pick(track)
 
                 await self._finished.wait()
 
@@ -327,7 +343,7 @@ class GuildPlayer:
         if self._failures >= limit:
             extra = ""
             if self.autoplay:
-                self.autoplay = False  # otherwise autoplay would keep feeding failing songs
+                self.set_autoplay(False)  # otherwise autoplay would keep feeding failing songs
                 extra = " Autoplay is paused until it's turned back on."
             await self._send_error(
                 f"{self._failures} songs in a row failed to play, so I've cleared the queue.{extra} "
@@ -339,23 +355,90 @@ class GuildPlayer:
         await self._send_error(f"Skipped **{embeds.escape(track.display_title)}**: {exc}")
 
     # ----- prefetch & autoplay ----------------------------------------
-    def _schedule_prefetch(self) -> None:
-        self._cancel(self._prefetch_task)
-        self._prefetch_task = asyncio.create_task(self._prefetch())
+    def _next_up(self) -> Track | None:
+        """The song that plays after the current one, if it's known yet.
 
-    async def _prefetch(self) -> None:
-        nxt = self.queue.peek()
-        if nxt is None:
+        Loops need nothing extra: a repeating song or queue keeps its stream link.
+        """
+        return self.queue.peek() or (self._autoplay_next if self.autoplay else None)
+
+    def _schedule_prefetch(self) -> None:
+        """Get the next song ready in the background, so it starts without a gap.
+
+        Runs whenever the queue changes and when a song starts.
+        """
+        if self.destroyed:
             return
-        await asyncio.sleep(2)
+        nxt = self._next_up()
+        if nxt is not None and nxt is self._prefetch_target and self._prefetch_task is not None:
+            return  # already getting this song ready (or done)
+        running = self._prefetch_task is not None and not self._prefetch_task.done()
+        if running and self._prefetch_target is self.queue.current:
+            # Its turn just came: _play is about to wait for this lookup, so let it finish.
+            # The next song gets prefetched when this one starts playing.
+            return
+        self._cancel(self._prefetch_task)
+        self._prefetch_target = nxt
+        self._prefetch_task = asyncio.create_task(self._prefetch(nxt)) if nxt is not None else None
+
+    async def _prefetch(self, track: Track) -> None:
+        await asyncio.sleep(PREFETCH_DELAY)  # let a burst of queue edits settle
+        self._prefetch_loading = track
         try:
-            await self.bot.resolver.prepare(nxt)
+            await self.bot.resolver.prepare(track)
         except SourceError:
             pass  # Reported properly when it's this track's turn.
         except Exception:
             log.debug("Prefetch failed", exc_info=True)
+        finally:
+            if self._prefetch_loading is track:
+                self._prefetch_loading = None
 
-    async def _autoplay_pick(self) -> Track | None:
+    async def _await_prefetch(self, track: Track) -> None:
+        """If the prefetch is already looking this song up, wait for it instead of doing it twice."""
+        task = self._prefetch_task
+        if task is None or task.done() or self._prefetch_target is not track:
+            return
+        if self._prefetch_loading is not track:
+            self._cancel(task)  # still in its settle delay: just load the song now
+            return
+        await asyncio.wait({task})  # doesn't cancel the prefetch if we're cancelled
+
+    def set_autoplay(self, enabled: bool) -> None:
+        self.autoplay = enabled
+        self._autoplay_misses = 0
+        current = self.queue.current
+        if enabled and current is not None and self.is_playing:
+            self._schedule_autoplay_pick(current)
+        elif not enabled:
+            self._cancel(self._autoplay_task)
+            self._autoplay_next = None
+
+    def _schedule_autoplay_pick(self, track: Track) -> None:
+        """Pick autoplay's next song shortly before ``track`` ends, so it can be got ready in time."""
+        self._cancel(self._autoplay_task)
+        self._autoplay_next = None
+        if self.autoplay and track.duration and not track.is_live:
+            self._autoplay_task = asyncio.create_task(self._autoplay_pick_ahead(track))
+
+    async def _autoplay_pick_ahead(self, track: Track) -> None:
+        # Pausing stretches the wait, because position() stops while paused.
+        while True:
+            if self.destroyed or self.queue.current is not track:
+                return
+            remaining = (track.duration or 0) - self.position()
+            if remaining <= AUTOPLAY_LOOKAHEAD:
+                break
+            await asyncio.sleep(min(remaining - AUTOPLAY_LOOKAHEAD, 5.0))
+        if not self.autoplay or self.queue.loop is not LoopMode.OFF or not self.queue.is_empty:
+            return  # something else plays next
+        pick = await self._autoplay_pick(count_miss=False)  # the end-of-song pick counts misses
+        if pick is None or self.destroyed or self.queue.current is not track or not self.queue.is_empty:
+            return
+        self._autoplay_next = pick
+        self._schedule_prefetch()
+
+    async def _autoplay_pick(self, *, count_miss: bool = True) -> Track | None:
         if self._autoplay_misses >= 3:
             return None
         try:
@@ -365,7 +448,7 @@ class GuildPlayer:
         except Exception:
             log.exception("Autoplay failed in guild %s", self.guild.id)
             track = None
-        if track is None:
+        if track is None and count_miss:
             self._autoplay_misses += 1
         return track
 
@@ -494,7 +577,7 @@ class GuildPlayer:
             return
         self.destroyed = True
         self.bot.players.forget(self.guild.id)
-        for task in (self._idle_task, self._alone_task, self._prefetch_task):
+        for task in (self._idle_task, self._alone_task, self._prefetch_task, self._autoplay_task):
             self._cancel(task)
         self._end_reason = "stopped"
         self.queue.stop()

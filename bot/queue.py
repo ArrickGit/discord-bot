@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from collections import deque
+from collections.abc import Callable
 from enum import StrEnum
 
 from .models import Track
@@ -29,9 +30,25 @@ class MusicQueue:
             raise ValueError("max_size must be positive")
         self.max_size = max_size
         self.current: Track | None = None
-        self.loop = LoopMode.OFF
+        self._loop = LoopMode.OFF
         self._upcoming: list[Track] = []
         self.history: deque[Track] = deque(maxlen=history_size)
+        # Called after anything that may change which song plays next (the player
+        # uses it to get that song ready in the background).
+        self.on_change: Callable[[], None] | None = None
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
+
+    @property
+    def loop(self) -> LoopMode:
+        return self._loop
+
+    @loop.setter
+    def loop(self, mode: LoopMode) -> None:
+        self._loop = mode
+        self._changed()
 
     # ----- inspection -------------------------------------------------
     @property
@@ -62,8 +79,10 @@ class MusicQueue:
             raise QueueFullError(f"The queue is full ({self.max_size} songs).")
         if front:
             self._upcoming.insert(0, track)
+            self._changed()
             return 1
         self._upcoming.append(track)
+        self._changed()
         return len(self._upcoming)
 
     def add_many(self, tracks: list[Track], *, front: bool = False) -> tuple[int, int]:
@@ -73,6 +92,8 @@ class MusicQueue:
             self._upcoming[0:0] = accepted
         else:
             self._upcoming.extend(accepted)
+        if accepted:
+            self._changed()
         return len(accepted), len(tracks) - len(accepted)
 
     def _index(self, position: int) -> int:
@@ -83,28 +104,34 @@ class MusicQueue:
         return position - 1
 
     def remove(self, position: int) -> Track:
-        return self._upcoming.pop(self._index(position))
+        track = self._upcoming.pop(self._index(position))
+        self._changed()
+        return track
 
     def move(self, from_pos: int, to_pos: int) -> Track:
         src = self._index(from_pos)
         dst = self._index(to_pos)
         track = self._upcoming.pop(src)
         self._upcoming.insert(dst, track)
+        self._changed()
         return track
 
     def shuffle(self, rng: random.Random | None = None) -> None:
         (rng or random).shuffle(self._upcoming)
+        self._changed()
 
     def clear(self) -> int:
         """Remove upcoming tracks (the current song keeps playing)."""
         count = len(self._upcoming)
         self._upcoming.clear()
+        self._changed()
         return count
 
     def stop(self) -> None:
         """Clear everything including the current track."""
         self._upcoming.clear()
         self.current = None
+        self._changed()
 
     def drop_current(self) -> None:
         """Forget the current track without re-queueing it (used after failures)."""
@@ -121,11 +148,14 @@ class MusicQueue:
         finished = self.current
         if finished is not None:
             if self.loop is LoopMode.SONG and not skipped:
-                finished.clear_stream()
+                # Keep its stream link: the player refreshes it only if it's about to expire.
                 return finished
             self.history.append(finished)
             if self.loop is LoopMode.QUEUE:
-                self._upcoming.append(finished.copy_for(finished.requester_id, finished.requester_name))
+                self._upcoming.append(
+                    finished.copy_for(finished.requester_id, finished.requester_name, keep_stream=True)
+                )
 
         self.current = self._upcoming.pop(0) if self._upcoming else None
+        self._changed()
         return self.current

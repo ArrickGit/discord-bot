@@ -87,9 +87,9 @@ def test_advance_loop_song_repeats_unless_skipped():
     q.add_many([make_track(1), make_track(2)])
     q.loop = LoopMode.SONG
     first = q.advance()
-    first.stream_url = "https://expired"
+    first.stream_url = "https://stream"
     assert q.advance() is first
-    assert first.stream_url is None  # stream refreshed on each repeat
+    assert first.stream_url == "https://stream"  # kept; the player refreshes it only if expiring
     assert q.advance(skipped=True).title == "Song 2"
 
 
@@ -99,6 +99,34 @@ def test_advance_loop_queue_cycles():
     q.loop = LoopMode.QUEUE
     seen = [q.advance().title for _ in range(5)]
     assert seen == ["Song 1", "Song 2", "Song 1", "Song 2", "Song 1"]
+
+
+def test_queue_loop_keeps_stream_link_on_requeue():
+    q = MusicQueue()
+    q.add(make_track(1))
+    q.loop = LoopMode.QUEUE
+    first = q.advance()
+    first.stream_url, first.stream_expires_at = "https://stream", 123.0
+    again = q.advance()
+    assert again is not first  # a fresh copy...
+    assert (again.stream_url, again.stream_expires_at) == ("https://stream", 123.0)  # ...with the same link
+
+
+def test_on_change_fires_when_next_song_may_change():
+    q = MusicQueue()
+    calls = []
+    q.on_change = lambda: calls.append(1)
+    q.add(make_track(1))
+    q.add_many([make_track(2), make_track(3)])
+    q.add_many([])  # nothing added: no call
+    q.move(3, 1)
+    q.remove(1)
+    q.shuffle(random.Random(1))
+    q.loop = LoopMode.QUEUE
+    q.advance()
+    q.clear()
+    q.stop()
+    assert len(calls) == 9
 
 
 def test_skip_in_queue_loop_requeues_skipped_song():
