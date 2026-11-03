@@ -122,6 +122,11 @@ class GuildPlayer:
         channel = self.channel
         return [m.id for m in channel.members if not m.bot] if channel else []
 
+    @property
+    def _tag(self) -> str:
+        """``[Server name]`` prefix for log lines."""
+        return f"[{getattr(self.guild, 'name', None) or self.guild.id}]"
+
     def position(self) -> float:
         """Seconds into the current track (including any part skipped when resuming)."""
         if self._started_at is None:
@@ -160,6 +165,7 @@ class GuildPlayer:
                 await me.edit(suppress=False)
             except discord.HTTPException:
                 pass
+        log.info("%s Joined voice channel \"%s\"", self._tag, channel.name)
         self.start()
         self.check_alone()
 
@@ -175,6 +181,11 @@ class GuildPlayer:
         if added:
             self._autoplay_misses = 0
             self._wake.set()
+            first = tracks[0]
+            where = "to play next" if front else f"at position {len(self.queue) if added == 1 else len(self.queue) - added + 1}"
+            what = f'"{first.display_title}"' if added == 1 else f'{added} songs, starting with "{first.display_title}"'
+            extra = f"; {dropped} didn't fit" if dropped else ""
+            log.info("%s Queued %s %s (by %s)%s", self._tag, what, where, first.requester_id or "autoplay", extra)
         return added, dropped
 
     def pause(self) -> bool:
@@ -182,6 +193,7 @@ class GuildPlayer:
             self.voice.pause()
             self._paused_at = time.monotonic()
             self._start_idle_timer(paused=True)
+            log.info("%s Paused at %s", self._tag, fmt_duration(self.position()))
             return True
         return False
 
@@ -193,6 +205,7 @@ class GuildPlayer:
             self._paused_at = None
             self._auto_paused = False
             self._cancel(self._idle_task)
+            log.info("%s Resumed at %s", self._tag, fmt_duration(self.position()))
             return True
         return False
 
@@ -250,6 +263,7 @@ class GuildPlayer:
             return
 
         history_id: int | None = None
+        started = False
         offset = 0.0
         if self._resume_from is not None and self._resume_from[0] is track:
             offset = 0.0 if track.is_live else max(0.0, self._resume_from[1])
@@ -290,7 +304,9 @@ class GuildPlayer:
                     source.cleanup()
                     return
                 if attempt == 0:
+                    started = True
                     self._failures = 0
+                    self._log_now_playing(track, offset)
                     if self._resume_paused:
                         self._resume_paused = False
                         self.pause()
@@ -310,18 +326,36 @@ class GuildPlayer:
                 )
                 if died_early and attempt == 0 and not self.destroyed:
                     # Usually an expired or rejected stream URL: refresh it once.
-                    log.info("Stream for %r ended after %.1fs; retrying with a fresh URL", track.title, played)
+                    log.info(
+                        "%s Stream for \"%s\" ended after %.1fs; retrying with a fresh link",
+                        self._tag, track.display_title, played,
+                    )
                     track.clear_stream()
                     continue
                 if died_early:
                     await self._track_failed(track, SourceError("The audio stream kept failing."))
                 break
         finally:
+            reason = self._end_reason or ("error" if self._play_error else "completed")
+            if started:
+                log.info(
+                    "%s Finished \"%s\" after %s (%s)",
+                    self._tag, track.display_title, fmt_duration(self.position()), reason,
+                )
             if history_id is not None:
-                reason = self._end_reason or ("error" if self._play_error else "completed")
                 await self._record_end(history_id, self.position(), reason)
             self._started_at = None
             self._start_offset = 0.0
+
+    def _log_now_playing(self, track: Track, offset: float) -> None:
+        details = [fmt_duration(track.duration) if track.duration else ("live" if track.is_live else "length unknown")]
+        details.append("autoplay pick" if track.via == "autoplay" else f"requested by {track.requester_id}")
+        if offset >= 1:
+            details.append(f"resumed from {fmt_duration(offset)}")
+        if self.queue.loop is not LoopMode.OFF:
+            details.append(f"loop: {self.queue.loop.value}")
+        details.append(f"{len(self.queue)} more queued")
+        log.info("%s Now playing \"%s\" (%s)", self._tag, track.display_title, ", ".join(details))
 
     def _after(self, error: Exception | None) -> None:
         # Runs in discord.py's audio thread.
@@ -363,7 +397,7 @@ class GuildPlayer:
 
     async def _track_failed(self, track: Track, exc: SourceError) -> None:
         self._failures += 1
-        log.info("Skipping %r in guild %s: %s", track.title, self.guild.id, exc)
+        log.info("%s Skipping \"%s\": %s", self._tag, track.display_title, exc)
         self.queue.drop_current()
         # Platform blocks tend to affect every song, so give up sooner on those.
         limit = 2 if isinstance(exc, SourceBlockedError) else MAX_CONSECUTIVE_FAILURES
@@ -483,6 +517,7 @@ class GuildPlayer:
         self._prefetch_loading = track
         try:
             await self.bot.resolver.prepare(track)
+            log.info("%s Got \"%s\" ready to play next", self._tag, track.display_title)
         except SourceError:
             pass  # Reported properly when it's this track's turn.
         except Exception:
@@ -574,6 +609,11 @@ class GuildPlayer:
     async def _go_idle(self) -> None:
         self._started_at = None
         leave_at = self._start_idle_timer()
+        if self.queue.history:  # not on a fresh join, before anything has played
+            log.info(
+                "%s Queue finished; leaving in %s unless something is added",
+                self._tag, fmt_duration(max(0, leave_at - time.time())),
+            )
         await self.update_now_playing(idle_until=leave_at)
 
     def _timeout(self) -> int:
@@ -720,7 +760,7 @@ class GuildPlayer:
                 await self.text_channel.send(embed=embeds.disconnected(reason), delete_after=120)
             except discord.HTTPException:
                 pass
-        log.info("Player for guild %s destroyed: %s", self.guild.id, reason)
+        log.info("%s Left voice: %s", self._tag, reason)
 
 
 class PlayerManager:
