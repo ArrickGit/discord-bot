@@ -161,11 +161,8 @@ class Playlists(commands.GroupCog, group_name="playlist", group_description="You
         tracks = [s.to_track(uid, uname) for s in stored]
         if shuffle:
             random.shuffle(tracks)
-        auto_shuffled = player.shuffle_for_autoplay(tracks)
         added, dropped = player.enqueue(tracks)
         text = f"✅ Queued {added} songs from **{escape(name)}**."
-        if auto_shuffled and not shuffle:
-            text += " 🔀 Shuffled because autoplay is on."
         if dropped:
             text += f" {dropped} didn't fit in the queue."
         await interaction.followup.send(text, ephemeral=True)
