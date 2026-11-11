@@ -183,9 +183,19 @@ def combine(per_user: list[Scored | None]) -> Scored | None:
     return Scored(per_user[0].track_key, total, reasons)  # type: ignore[union-attr]
 
 
-def pick(scored: list[Scored], rng: random.Random | None = None, top_n: int = 8) -> Scored | None:
-    """Weighted random choice among the best candidates, keeping some variety."""
+def pick(
+    scored: list[Scored], rng: random.Random | None = None, top_n: int = 8, *, shuffle: bool = False
+) -> Scored | None:
+    """Weighted random choice among the best candidates, keeping some variety.
+
+    With ``shuffle`` (used by autoplay), every song the listeners like has an
+    equal chance instead, so favourites don't come back in the same order.
+    """
     rng = rng or random.Random()
+    if shuffle:
+        liked = [s for s in scored if s.score > 0]
+        if liked:
+            return rng.choice(liked)
     pool = sorted((s for s in scored if s.score > -20), key=lambda s: s.score, reverse=True)[:top_n]
     if not pool:
         return None

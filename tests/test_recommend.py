@@ -76,6 +76,18 @@ def test_pick_prefers_high_scores_but_varies():
     assert recommend.pick([recommend.Scored("x", -50, [])]) is None
 
 
+def test_pick_shuffle_spreads_evenly_over_liked_songs():
+    scored = [recommend.Scored(f"k{i}", float(i * 10), []) for i in range(1, 21)]
+    scored.append(recommend.Scored("disliked", -5, []))
+    rng = random.Random(0)
+    picks = [recommend.pick(scored, rng, shuffle=True).track_key for _ in range(2000)]
+    assert "disliked" not in picks
+    assert set(picks) == {f"k{i}" for i in range(1, 21)}  # not just the top 8
+    assert picks.count("k1") > 50 and picks.count("k20") < 150  # roughly even (~100 each)
+    # Falls back to the normal pick when nothing scores above zero.
+    assert recommend.pick([recommend.Scored("meh", -1, [])], rng, shuffle=True).track_key == "meh"
+
+
 def test_top_artists():
     s = recommend.build_signals(
         [(1, "a", "Alpha", "good", NOW), (1, "b", "Beta", "bad", NOW)],

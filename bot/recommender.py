@@ -129,7 +129,7 @@ class Recommender:
                 discoveries[pseudo] = d
                 scored.append(combined)
 
-        choice = recommend.pick(scored, self._rng)
+        choice = recommend.pick(scored, self._rng, shuffle=via == "autoplay")
         if choice is None:
             return None
         if choice.track_key in discoveries:
