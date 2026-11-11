@@ -584,6 +584,22 @@ class GuildPlayer:
             self._autoplay_misses += 1
         return track
 
+    @property
+    def is_idle(self) -> bool:
+        return self.queue.current is None and self.queue.is_empty
+
+    async def autoplay_now(self) -> Track | None:
+        """Pick and queue a song right away (used when autoplay is switched on while idle).
+
+        Returns the picked track, or ``None`` when there isn't enough listening
+        history to recommend anything yet.
+        """
+        track = await self._autoplay_pick()
+        # The playback loop may have picked something itself while we were waiting.
+        if track is not None and self.is_idle:
+            self.enqueue([track])
+        return track
+
     def _recent_keys(self) -> set[str]:
         keys = {t.key for t in self.queue.history if t.key}
         keys |= {t.key for t in self.queue.upcoming if t.key}

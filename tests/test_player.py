@@ -470,6 +470,35 @@ async def test_autoplay_picks_when_queue_empty(setup):
     await until(lambda: voice.played == ["Song 1", "Song auto"])
 
 
+async def test_autoplay_now_starts_playing_when_idle(setup):
+    bot, player, voice = setup
+    player.autoplay = True
+    rec = short("auto")
+    rec.via = "autoplay"
+    bot.recommender.next = rec
+    assert player.is_idle
+    assert await player.autoplay_now() is rec
+    await until(lambda: voice.played == ["Song auto"])
+
+
+async def test_autoplay_now_reports_nothing_to_pick(setup):
+    bot, player, voice = setup
+    player.autoplay = True
+    assert await player.autoplay_now() is None
+    await asyncio.sleep(0.05)
+    assert voice.played == []
+    assert player.is_idle
+
+
+async def test_autoplay_now_does_not_queue_if_something_started(setup):
+    bot, player, voice = setup
+    player.enqueue([short(1)])
+    await until(lambda: voice.played == ["Song 1"])
+    bot.recommender.next = short("auto")
+    await player.autoplay_now()
+    assert player.queue.is_empty
+
+
 async def test_destroy_disconnects_and_unregisters(setup):
     bot, player, voice = setup
     player.enqueue([short(1)])

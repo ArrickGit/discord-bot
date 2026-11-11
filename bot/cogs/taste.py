@@ -100,19 +100,51 @@ class Taste(commands.Cog):
             require(interaction, player, Action.CONTROL)
         else:
             require_setting_control(interaction, await self.bot.db.get_guild_settings(interaction.guild.id))
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        member = interaction.user
+        in_voice = isinstance(member, discord.Member) and member.voice is not None and member.voice.channel is not None
+        if enabled and in_voice and (player is None or player.channel is None):
+            # Join the caller's channel so autoplay can start straight away.
+            player = await ensure_player(interaction)
+
         settings = await self.bot.db.update_guild_settings(interaction.guild.id, autoplay=enabled)
         if player is not None:
             player.settings = settings
             player.set_autoplay(enabled)
-            if enabled and player.queue.current is None:
-                player._wake.set()
+
+        if not enabled:
+            if player is not None and not player.is_idle:
+                await player.update_now_playing()
+            await interaction.followup.send("Autoplay off.", ephemeral=True)
+            return
+
+        if player is None or player.channel is None:
+            await interaction.followup.send(
+                "🔁 Autoplay on. Join a voice channel and run `/autoplay true` again to start it now, "
+                "or it'll take over when your queue runs out.",
+                ephemeral=True,
+            )
+            return
+
+        if not player.is_idle:
             await player.update_now_playing()
-        text = (
-            "🔁 Autoplay on: when the queue ends I'll pick songs for the people listening."
-            if enabled
-            else "Autoplay off."
-        )
-        await interaction.response.send_message(text, ephemeral=True)
+            await interaction.followup.send(
+                "🔁 Autoplay on: when the queue ends I'll pick songs for the people listening.", ephemeral=True
+            )
+            return
+
+        track = await player.autoplay_now()
+        if track is None:
+            await interaction.followup.send(
+                "🔁 Autoplay is on, but I don't know enough about what you all like to pick a song yet. "
+                "Play a few songs with `/play` (and rate them with `/rate`), then I'll take over when the queue ends.",
+                ephemeral=True,
+            )
+            return
+        reason = f"\nBecause {track.reasons[0]}." if track.reasons else ""
+        title = escape(truncate(track.display_title, 90))
+        await interaction.followup.send(f"🔁 Autoplay on: starting with **{title}**.{reason}", ephemeral=True)
 
     # ----- profile & privacy ------------------------------------------
     @app_commands.command(name="profile", description="See what the bot has learned about your taste")
