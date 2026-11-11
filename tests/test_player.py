@@ -470,6 +470,27 @@ async def test_autoplay_picks_when_queue_empty(setup):
     await until(lambda: voice.played == ["Song 1", "Song auto"])
 
 
+async def test_shuffle_for_autoplay_only_when_starting_fresh(setup, monkeypatch):
+    bot, player, voice = setup
+    monkeypatch.setattr("bot.player.random.shuffle", lambda items: items.reverse())
+    tracks = [short(1), short(2), short(3)]
+
+    player.autoplay = False
+    assert not player.shuffle_for_autoplay(tracks)
+    assert [t.title for t in tracks] == ["Song 1", "Song 2", "Song 3"]
+
+    player.autoplay = True
+    assert player.shuffle_for_autoplay(tracks)
+    assert [t.title for t in tracks] == ["Song 3", "Song 2", "Song 1"]
+    assert not player.shuffle_for_autoplay([short(4)])  # nothing to shuffle
+
+    player.enqueue(tracks)
+    await until(lambda: voice.played == ["Song 3"])
+    more = [short(5), short(6)]
+    assert not player.shuffle_for_autoplay(more)  # already playing: keep the order
+    assert [t.title for t in more] == ["Song 5", "Song 6"]
+
+
 async def test_autoplay_now_starts_playing_when_idle(setup):
     bot, player, voice = setup
     player.autoplay = True

@@ -72,6 +72,7 @@ class Music(commands.Cog):
             raise ControlError("I left the voice channel while that was loading.")
 
         immediate = starts_now(player)
+        shuffled = player.shuffle_for_autoplay(result.tracks)
         added, dropped = player.enqueue(result.tracks, front=next)
         if not added:
             raise QueueError("The queue is full.")
@@ -84,6 +85,8 @@ class Music(commands.Cog):
             if result.truncated or dropped:
                 parts.append(f"Stopped at the limit of {limit} songs.")
             parts.extend(result.notes)
+            if shuffled:
+                parts.append("🔀 Shuffled because autoplay is on.")
             await interaction.edit_original_response(content=" ".join(parts))
             await self._announce(
                 player,

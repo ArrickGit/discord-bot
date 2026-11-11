@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import shlex
 import time
 from typing import TYPE_CHECKING, Any
@@ -587,6 +588,17 @@ class GuildPlayer:
     @property
     def is_idle(self) -> bool:
         return self.queue.current is None and self.queue.is_empty
+
+    def shuffle_for_autoplay(self, tracks: list[Track]) -> bool:
+        """With autoplay on, songs that start a fresh session play in random order.
+
+        Shuffles ``tracks`` in place when the bot has nothing playing or queued
+        yet. Returns whether it shuffled.
+        """
+        if not self.autoplay or not self.is_idle or len(tracks) < 2:
+            return False
+        random.shuffle(tracks)
+        return True
 
     async def autoplay_now(self) -> Track | None:
         """Pick and queue a song right away (used when autoplay is switched on while idle).
